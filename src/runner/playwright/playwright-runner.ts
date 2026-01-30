@@ -56,11 +56,59 @@ export class PlaywrightRunner implements PurchaseRunner {
     res: import("@playwright/test").APIResponse
   ): Promise<{ status: number; text: string }> {
     const status = res.status();
+    const headers = res.headers();
+    const contentType = headers["content-type"];
+    const location = headers["location"];
     const text = await res.text();
+    const snippet = text.slice(0, 8000);
     console.log(`\n==== ${label} ====`);
     console.log("status:", status);
-    console.log("body:", text);
+    console.log("content-type:", contentType);
+    console.log("location:", location);
+    console.log("body:", snippet);
     return { status, text };
+  }
+
+  private async browserFetchText(
+    page: import("@playwright/test").Page,
+    {
+      url,
+      method = "GET",
+      headers,
+      body,
+    }: { url: string; method?: string; headers?: Record<string, string>; body?: string }
+  ): Promise<{ status: number; text: string; headers: Record<string, string> }> {
+    return page.evaluate(
+      async ({ url, method, headers, body }) => {
+        const res = await fetch(url, {
+          method,
+          headers,
+          body,
+          credentials: "include",
+        });
+        const text = await res.text();
+        const outHeaders: Record<string, string> = {};
+        res.headers.forEach((value, key) => {
+          outHeaders[key.toLowerCase()] = value;
+        });
+        return { status: res.status, text, headers: outHeaders };
+      },
+      { url, method, headers, body }
+    );
+  }
+
+  private debugBrowserFetch(
+    label: string,
+    res: { status: number; text: string; headers: Record<string, string> }
+  ): void {
+    const contentType = res.headers["content-type"];
+    const location = res.headers["location"];
+    const snippet = res.text.slice(0, 8000);
+    console.log(`\n==== ${label} ====`);
+    console.log("status:", res.status);
+    console.log("content-type:", contentType);
+    console.log("location:", location);
+    console.log("body:", snippet);
   }
 
   // =========================
@@ -231,12 +279,8 @@ export class PlaywrightRunner implements PurchaseRunner {
       `https://testdigital3.redcoto.com.ar/rest/model/atg/actors/cvActor/validarCarritoPreCheckout` +
       `?pushSite=CotoDigital&_dynSessConf=${encodeURIComponent(this.sessionToken)}`;
 
-    await page.evaluate(async (url) => {
-      await fetch(url, {
-        method: "GET",
-        credentials: "include",
-      });
-    }, validarUrl);
+    const validarRes = await this.browserFetchText(page, { url: validarUrl, method: "GET" });
+    this.debugBrowserFetch("validarCarritoPreCheckout", validarRes);
 
       const costoUrl =
         `https://testdigital3.redcoto.com.ar/rest/model/atg/actors/cvActor/getCostoEnvio` +
@@ -257,18 +301,16 @@ export class PlaywrightRunner implements PurchaseRunner {
       }));
       form.set("cupones", JSON.stringify({ cupones: [] }));
 
-      const res = await page.evaluate(async ({ url, body }) => {
-        const r = await fetch(url, {
-          method: "POST",
-          headers: { "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8" },
-          body,
-          credentials: "include",
-        });
-        return r.status;
-      }, { url: costoUrl, body: form.toString() });
+      const costoRes = await this.browserFetchText(page, {
+        url: costoUrl,
+        method: "POST",
+        headers: { "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8" },
+        body: form.toString(),
+      });
+      this.debugBrowserFetch("getCostoEnvio", costoRes);
 
-      if (res !== 200) {
-        throw new Error(`refreshCheckout getCostoEnvio HTTP ${res}`);
+      if (costoRes.status !== 200) {
+        throw new Error(`refreshCheckout getCostoEnvio HTTP ${costoRes.status}`);
       }
     } finally {
       await ctx.close();
@@ -280,6 +322,7 @@ export class PlaywrightRunner implements PurchaseRunner {
   | { success: false; reason: "OUT_OF_STOCK" | "GENERIC_ERROR" }
 > {
     const plans = await this.getPaymentPlans();
+    const useBrowserCommit = process.env.COMMIT_VIA_BROWSER === "true";
 
     const body = new URLSearchParams({
       pushSite: "CotoDigital",
@@ -310,15 +353,44 @@ export class PlaywrightRunner implements PurchaseRunner {
       resolucion: "1265x978",
     });
 
-    const res = await this.api.post(
-      "/rest/model/atg/actors/cvActor/commitOrder",
-      {
-        headers: { "Content-Type": "application/x-www-form-urlencoded" },
-        data: body.toString(),
-      }
-    );
+    let text = "";
 
-    const { text } = await this.debugHttp("commitOrder", res);
+    if (useBrowserCommit) {
+      const ctx = await this.browser.newContext({
+        ignoreHTTPSErrors: true,
+        storageState: this.storageStateCache,
+      });
+      const page = await ctx.newPage();
+      try {
+        await page.goto(
+          "https://testdigital3.redcoto.com.ar/sitios/cdigi/nuevositio",
+          { waitUntil: "domcontentloaded" }
+        );
+        const commitUrl =
+          `https://testdigital3.redcoto.com.ar/rest/model/atg/actors/cvActor/commitOrder`;
+        const commitRes = await this.browserFetchText(page, {
+          url: commitUrl,
+          method: "POST",
+          headers: { "Content-Type": "application/x-www-form-urlencoded" },
+          body: body.toString(),
+        });
+        this.debugBrowserFetch("commitOrder(browser)", commitRes);
+        text = commitRes.text;
+      } finally {
+        await ctx.close();
+      }
+    } else {
+      const res = await this.api.post(
+        "/rest/model/atg/actors/cvActor/commitOrder",
+        {
+          headers: { "Content-Type": "application/x-www-form-urlencoded" },
+          data: body.toString(),
+        }
+      );
+
+      const debug = await this.debugHttp("commitOrder", res);
+      text = debug.text;
+    }
 
     try {
       const parsed = JSON.parse(text);
