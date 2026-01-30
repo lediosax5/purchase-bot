@@ -46,11 +46,6 @@ export class PlaywrightRunner implements PurchaseRunner {
     throw new Error(`Formato de BANDA_ENTREGA no soportado: ${s}`);
   }
 
-  private bandasForCommit(raw: string): string {
-    const r = this.normalizeBandasRaw(raw);
-    return `1_${r.replace("-", "_")}`;
-  }
-
   private async debugHttp(
     label: string,
     res: import("@playwright/test").APIResponse
@@ -324,20 +319,25 @@ export class PlaywrightRunner implements PurchaseRunner {
     const plans = await this.getPaymentPlans();
     const useBrowserCommit = process.env.COMMIT_VIA_BROWSER === "true";
 
-    const body = new URLSearchParams({
+    const params = {
       pushSite: "CotoDigital",
       _dynSessConf: this.sessionToken,
 
+      adicionales: "",
+      bandasEntrega: this.bandaEntregaRaw,
+      binTarjeta: "",
+      cambioMedioPago: "",
+      chanceSorteo: "12",
+      cobroOnline: "2",
+      codigoCampana: "",
+      CuponesElegidos: "",
+      docuRappi: "",
+      fechaCompraOrigen: "",
+      fechaEntregaOrigen: "",
+      fechaEnvioOrigen: "",
       idFormaPago: this.requireEnv("ID_FORMA_PAGO"),
       idTarjetaBanco: this.requireEnv("ID_TARJETA_BANCO"),
       idPlanesPago: plans.idPlanesPago,
-      planInit: plans.planInit,
-      planTracer: plans.planTracer,
-
-      fechasCobro: `1_${this.requireEnv("FECHA_COBRO")}`,
-      fechasEntrega: `1_${this.requireEnv("FECHA_ENTREGA")}`,
-      bandasEntrega: this.bandasForCommit(this.bandaEntregaRaw),
-
       idTiposPago: "1_2",
       idTiposServicioEntrega: "1_300",
 
@@ -346,12 +346,29 @@ export class PlaywrightRunner implements PurchaseRunner {
       idDireccionEntrega: this.requireEnv("ID_DIRECCION_ENTREGA"),
       idCondicionIVA: "0",
       idDatosFacturacion: "0",
-
-      cobroOnline: "2",
+      idProfile: "",
+      fechasCobro: `1_${this.requireEnv("FECHA_COBRO")}`,
+      fechasEntrega: `1_${this.requireEnv("FECHA_ENTREGA")}`,
+      fechasRetiro: "",
+      flagError: "false",
+      id: "",
+      idCanal: "",
+      nroCupones: "6391300183923124",
+      nroOrdenOrigen: "",
+      nroTarjeta: "",
+      observaciones: "",
+      omiteDescuento: "0",
       participaSorteo: "NO",
-      cuponesElegidos: JSON.stringify({ cupones: [] }),
-      resolucion: "1265x978",
-    });
+      pin: "111",
+      planInit: plans.planInit,
+      planTracer: plans.planTracer,
+      productosCantidad: "",
+      resolucion: "1764x988",
+      sucursalesRetiro: "",
+    };
+
+    const body = new URLSearchParams(params);
+    const query = body.toString();
 
     let text = "";
 
@@ -367,12 +384,11 @@ export class PlaywrightRunner implements PurchaseRunner {
           { waitUntil: "domcontentloaded" }
         );
         const commitUrl =
-          `https://testdigital3.redcoto.com.ar/rest/model/atg/actors/cvActor/commitOrder`;
+          `https://testdigital3.redcoto.com.ar/rest/model/atg/actors/cvActor/commitOrder?${query}`;
         const commitRes = await this.browserFetchText(page, {
           url: commitUrl,
           method: "POST",
           headers: { "Content-Type": "application/x-www-form-urlencoded" },
-          body: body.toString(),
         });
         this.debugBrowserFetch("commitOrder(browser)", commitRes);
         text = commitRes.text;
@@ -383,8 +399,8 @@ export class PlaywrightRunner implements PurchaseRunner {
       const res = await this.api.post(
         "/rest/model/atg/actors/cvActor/commitOrder",
         {
+          params,
           headers: { "Content-Type": "application/x-www-form-urlencoded" },
-          data: body.toString(),
         }
       );
 
