@@ -5,6 +5,7 @@ export interface PurchaseRunner {
 
   // auth
   login(user: { username: string; password: string }): Promise<void>;
+  getSessionToken(): string;
 
   // carrito / entrega
   clearCart(): Promise<void>;

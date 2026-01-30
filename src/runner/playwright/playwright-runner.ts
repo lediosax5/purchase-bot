@@ -6,6 +6,9 @@ export class PlaywrightRunner implements PurchaseRunner {
   private api!: APIRequestContext;
   private sessionToken!: string;
 
+  private bandaEntregaRaw!: string; // ej "9-13"
+  private storageStateCache: any;
+
   async init(): Promise<void> {
     this.browser = await chromium.launch({ headless: true });
   }
@@ -15,22 +18,56 @@ export class PlaywrightRunner implements PurchaseRunner {
     if (this.browser) await this.browser.close();
   }
 
+  getSessionToken(): string {
+    return this.sessionToken;
+  }
+
+  // =========================
+  // HELPERS
+  // =========================
   private requireEnv(name: string): string {
     const value = process.env[name];
-    if (!value) {
-      throw new Error(`Variable de entorno faltante: ${name}`);
-    }
+    if (!value) throw new Error(`Variable de entorno faltante: ${name}`);
     return value;
+  }
+
+  private normalizeBandasRaw(input: string): string {
+    const s = (input ?? "").trim();
+    if (!s) throw new Error("BANDA_ENTREGA vacía");
+
+    if (s.includes("_")) {
+      const parts = s.split("_").filter(Boolean);
+      const nums = parts[0] === "1" ? parts.slice(1) : parts;
+      if (nums.length >= 2) return `${nums[0]}-${nums[1]}`;
+    }
+
+    if (s.includes("-")) return s;
+
+    throw new Error(`Formato de BANDA_ENTREGA no soportado: ${s}`);
+  }
+
+  private bandasForCommit(raw: string): string {
+    const r = this.normalizeBandasRaw(raw);
+    return `1_${r.replace("-", "_")}`;
+  }
+
+  private async debugHttp(
+    label: string,
+    res: import("@playwright/test").APIResponse
+  ): Promise<{ status: number; text: string }> {
+    const status = res.status();
+    const text = await res.text();
+    console.log(`\n==== ${label} ====`);
+    console.log("status:", status);
+    console.log("body:", text);
+    return { status, text };
   }
 
   // =========================
   // LOGIN + SESSION
   // =========================
   async login(user: { username: string; password: string }): Promise<void> {
-    const context = await this.browser.newContext({
-      ignoreHTTPSErrors: true,
-    });
-
+    const context = await this.browser.newContext({ ignoreHTTPSErrors: true });
     const page = await context.newPage();
 
     try {
@@ -57,47 +94,41 @@ export class PlaywrightRunner implements PurchaseRunner {
             {
               method: "POST",
               headers: { "Content-Type": "application/json;charset=UTF-8" },
-              body: JSON.stringify({
-                login: username,
-                password,
-                isAngular: "true",
-              }),
+              body: JSON.stringify({ login: username, password, isAngular: "true" }),
               credentials: "include",
             }
           );
-
           return { status: res.status };
         },
-        {
-          username: user.username,
-          password: user.password,
-          token: this.sessionToken,
-        }
+        { username: user.username, password: user.password, token: this.sessionToken }
       );
 
       if (loginResult.status !== 200) {
         throw new Error(`HTTP error en login: ${loginResult.status}`);
       }
 
-      const storageState = await context.storageState();
-
+      this.storageStateCache = await context.storageState();
       this.api = await request.newContext({
         baseURL: "https://testdigital3.redcoto.com.ar",
         ignoreHTTPSErrors: true,
-        storageState,
+        storageState: this.storageStateCache,
       });
     } finally {
       await context.close();
     }
   }
 
-  getSessionToken(): string {
-    return this.sessionToken;
+  // =========================
+  // CARRITO
+  // =========================
+  async clearCart(): Promise<void> {
+    const res = await this.api.post(
+      "/rest/model/atg/actors/cCarritoActor/limpiarCarrito",
+      { params: { pushSite: "CotoDigital", _dynSessConf: this.sessionToken } }
+    );
+    if (res.status() !== 200) throw new Error("clearCart HTTP error");
   }
 
-  // =========================
-  // CARRITO / DIRECCIÓN
-  // =========================
   async selectAddress(direccionId: number): Promise<void> {
     const res = await this.api.get(
       "/rest/model/atg/actors/cProfileActor/changeDeliveryAddress",
@@ -109,25 +140,8 @@ export class PlaywrightRunner implements PurchaseRunner {
         },
       }
     );
-
     if (res.status() !== 200) {
       throw new Error(`selectAddress HTTP error (${direccionId})`);
-    }
-  }
-
-  async clearCart(): Promise<void> {
-    const res = await this.api.post(
-      "/rest/model/atg/actors/cCarritoActor/limpiarCarrito",
-      {
-        params: {
-          pushSite: "CotoDigital",
-          _dynSessConf: this.sessionToken,
-        },
-      }
-    );
-
-    if (res.status() !== 200) {
-      throw new Error("clearCart HTTP error");
     }
   }
 
@@ -135,53 +149,32 @@ export class PlaywrightRunner implements PurchaseRunner {
     const res = await this.api.post(
       "/rest/model/atg/actors/cProfileActor/getRepetirPedido",
       {
-        params: {
-          pushSite: "CotoDigital",
-          _dynSessConf: this.sessionToken,
-        },
+        params: { pushSite: "CotoDigital", _dynSessConf: this.sessionToken },
         data: { numeroPedido, orderId },
       }
     );
-
-    if (res.status() !== 200) {
-      throw new Error("repeatOrder HTTP error");
-    }
+    if (res.status() !== 200) throw new Error("repeatOrder HTTP error");
 
     const body = await res.json();
     if (body?.codigoError !== "0") {
-      throw new Error(
-        `repeatOrder fallo: ${body?.codigoError} ${body?.mensajeError}`
-      );
+      throw new Error(`repeatOrder fallo: ${body?.codigoError}`);
     }
   }
 
   async validateCart(): Promise<{ status: "OK" | "OUT_OF_STOCK" }> {
     const res = await this.api.post(
       "/rest/model/atg/actors/cvActor/validarCarritoPreCheckout",
-      {
-        params: {
-          pushSite: "CotoDigital",
-          _dynSessConf: this.sessionToken,
-        },
-      }
-    );
-
+      { params: { pushSite: "CotoDigital", _dynSessConf: this.sessionToken } }
+    );    
     const body = await res.json();
-    if (body?.codigoError === "10") {
-      return { status: "OUT_OF_STOCK" };
-    }
+    if (body?.codigoError === "10") return { status: "OUT_OF_STOCK" };
     return { status: "OK" };
   }
 
   async removeOutOfStock(): Promise<void> {
     await this.api.post(
       "/rest/model/atg/actors/cCarritoActor/eliminarSinStock",
-      {
-        params: {
-          pushSite: "CotoDigital",
-          _dynSessConf: this.sessionToken,
-        },
-      }
+      { params: { pushSite: "CotoDigital", _dynSessConf: this.sessionToken } }
     );
   }
 
@@ -206,10 +199,7 @@ export class PlaywrightRunner implements PurchaseRunner {
 
     const body = await res.json();
     const grupo = body?.planesCuotas?.[0]?.grupo;
-
-    if (!grupo) {
-      throw new Error("No se pudo obtener grupo de plan");
-    }
+    if (!grupo) throw new Error("No se pudo obtener grupo de plan");
 
     return {
       idPlanesPago: `${grupo}_51`,
@@ -219,130 +209,128 @@ export class PlaywrightRunner implements PurchaseRunner {
   }
 
   // =========================
-  // REFRESH CHECKOUT
+  // CHECKOUT + COMMIT
   // =========================
   async refreshCheckout(): Promise<void> {
-    if (!this.api) throw new Error("APIRequestContext no inicializado");
-  
-    const fechaCobro = this.requireEnv("FECHA_COBRO");
+    this.bandaEntregaRaw = this.normalizeBandasRaw(this.requireEnv("BANDA_ENTREGA"));
     const fechaEntrega = this.requireEnv("FECHA_ENTREGA");
-    const bandaEntrega = this.requireEnv("BANDA_ENTREGA");
-    const idFormaPago = this.requireEnv("ID_FORMA_PAGO");
-    const idTarjetaBanco = this.requireEnv("ID_TARJETA_BANCO");
-  
-    // 1) Sync carrito
-    const carritoRes = await this.api.get("/rest/model/atg/actors/cCarritoActor/getCarrito", {
-      params: { pushSite: "CotoDigital", _dynSessConf: this.sessionToken },
-    });
-    if (carritoRes.status() !== 200) {
-      throw new Error(`refreshCheckout:getCarrito HTTP ${carritoRes.status()}`);
-    }
-  
-    // 2) Recalcular planes
-    const planesRes = await this.api.get("/rest/model/atg/actors/cvActor/getPlanesCuotasOfertas", {
-      params: {
-        pushSite: "CotoDigital",
-        _dynSessConf: this.sessionToken,
-        idTipoGrupo: "0",
-        idFormaPago,
-        idTarjetaBanco,
-        fechaCobro,
-        cobroOnline: "2",
-      },
-    });
-    if (planesRes.status() !== 200) {
-      throw new Error(`refreshCheckout:getPlanesCuotasOfertas HTTP ${planesRes.status()}`);
-    }
-  
-    // 3) Costo envío (ShippingGroup)
-    const bodyCostoEnvio = {
-      envios: JSON.stringify({
-        envios: [
-          {
-            id: 0,
-            idTipoGrupo: "1",
-            costoEnvio: "399",
-            fechaEnvio: fechaEntrega,
-            bandasEntrega: bandaEntrega,
-            idServicioDisponible: "300",
-            sinCosto: false,
-          },
-        ],
-        importeTotal: 0,
-      }),
-      cupones: JSON.stringify({ cupones: [] }),
-    };
-  
-    const costoEnvioRes = await this.api.post("/rest/model/atg/actors/cvActor/getCostoEnvio", {
-      params: { pushSite: "CotoDigital", _dynSessConf: this.sessionToken },
-      headers: { "Content-Type": "application/json" },
-      data: bodyCostoEnvio,
-    });
-  
-    if (costoEnvioRes.status() !== 200) {
-      throw new Error(`refreshCheckout:getCostoEnvio HTTP ${costoEnvioRes.status()}`);
-    }
-  
-    await new Promise((r) => setTimeout(r, 1600));
-  }  
 
-  // =========================
-  // COMMIT ORDER
-  // =========================
+    const ctx = await this.browser.newContext({
+      ignoreHTTPSErrors: true,
+      storageState: this.storageStateCache,
+    });
+    const page = await ctx.newPage();
+
+    try {
+    await page.goto(
+    "https://testdigital3.redcoto.com.ar/sitios/cdigi/nuevositio",
+    { waitUntil: "domcontentloaded" }
+    );
+
+    const validarUrl =
+      `https://testdigital3.redcoto.com.ar/rest/model/atg/actors/cvActor/validarCarritoPreCheckout` +
+      `?pushSite=CotoDigital&_dynSessConf=${encodeURIComponent(this.sessionToken)}`;
+
+    await page.evaluate(async (url) => {
+      await fetch(url, {
+        method: "GET",
+        credentials: "include",
+      });
+    }, validarUrl);
+
+      const costoUrl =
+        `https://testdigital3.redcoto.com.ar/rest/model/atg/actors/cvActor/getCostoEnvio` +
+        `?pushSite=CotoDigital&_dynSessConf=${encodeURIComponent(this.sessionToken)}`;
+
+      const form = new URLSearchParams();
+      form.set("envios", JSON.stringify({
+        envios: [{
+          id: 0,
+          idTipoGrupo: "1",
+          costoEnvio: "399",
+          fechaEnvio: fechaEntrega,
+          bandasEntrega: this.bandaEntregaRaw,
+          idServicioDisponible: "300",
+          sinCosto: false,
+        }],
+        importeTotal: 0,
+      }));
+      form.set("cupones", JSON.stringify({ cupones: [] }));
+
+      const res = await page.evaluate(async ({ url, body }) => {
+        const r = await fetch(url, {
+          method: "POST",
+          headers: { "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8" },
+          body,
+          credentials: "include",
+        });
+        return r.status;
+      }, { url: costoUrl, body: form.toString() });
+
+      if (res !== 200) {
+        throw new Error(`refreshCheckout getCostoEnvio HTTP ${res}`);
+      }
+    } finally {
+      await ctx.close();
+    }
+  }
+
   async commitOrder(): Promise<
   | { success: true; orderId: string }
   | { success: false; reason: "OUT_OF_STOCK" | "GENERIC_ERROR" }
 > {
+    const plans = await this.getPaymentPlans();
+
     const body = new URLSearchParams({
       pushSite: "CotoDigital",
       _dynSessConf: this.sessionToken,
 
       idFormaPago: this.requireEnv("ID_FORMA_PAGO"),
       idTarjetaBanco: this.requireEnv("ID_TARJETA_BANCO"),
-      idPlanesPago: this.requireEnv("ID_PLANES_PAGO"),
+      idPlanesPago: plans.idPlanesPago,
+      planInit: plans.planInit,
+      planTracer: plans.planTracer,
 
       fechasCobro: `1_${this.requireEnv("FECHA_COBRO")}`,
       fechasEntrega: `1_${this.requireEnv("FECHA_ENTREGA")}`,
-      bandasEntrega: this.requireEnv("BANDA_ENTREGA"),
+      bandasEntrega: this.bandasForCommit(this.bandaEntregaRaw),
 
       idTiposPago: "1_2",
       idTiposServicioEntrega: "1_300",
 
+      // CLAVES: igual que Cypress
+      idPedidoCanal: "1",
+      idDireccionEntrega: this.requireEnv("ID_DIRECCION_ENTREGA"),
       idCondicionIVA: "0",
       idDatosFacturacion: "0",
 
       cobroOnline: "2",
       participaSorteo: "NO",
-      pin: "111",
+      cuponesElegidos: JSON.stringify({ cupones: [] }),
+      resolucion: "1265x978",
     });
 
     const res = await this.api.post(
       "/rest/model/atg/actors/cvActor/commitOrder",
       {
-        headers: {
-          "Content-Type": "application/x-www-form-urlencoded",
-        },
+        headers: { "Content-Type": "application/x-www-form-urlencoded" },
         data: body.toString(),
       }
     );
 
-    const raw = await res.text();
-    console.log("commitOrder raw:", raw);
+    const { text } = await this.debugHttp("commitOrder", res);
 
-    let parsed: any;
     try {
-      parsed = JSON.parse(raw);
-    } catch {
-      return { success: false, reason: "GENERIC_ERROR" };
-    }
+      const parsed = JSON.parse(text);
 
-    if (parsed?.codigoError === "0" && parsed?.orderId) {
-      return { success: true, orderId: String(parsed.orderId) };
-    }
+      if (parsed?.codigoError === "0" && parsed?.orderId) {
+        return { success: true, orderId: String(parsed.orderId) };
+      }
 
-    if (parsed?.codigoError === "1" && parsed?.sinStock) {
-      return { success: false, reason: "OUT_OF_STOCK" };
-    }
+      if (parsed?.codigoError === "1" && parsed?.sinStock) {
+        return { success: false, reason: "OUT_OF_STOCK" };
+      }
+    } catch {}
 
     return { success: false, reason: "GENERIC_ERROR" };
   }

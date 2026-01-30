@@ -12,8 +12,8 @@ curl http://localhost:3000/purchase `
      "entrega": {
        "tipo": "DELIVERY",
        "direcciones": [3689481245],
-       "fecha": "2026-01-27",
-       "banda": "MANIANA"
+       "fecha": "2026-02-02",
+       "banda": "TARDE"
      },
      "carrito": {
        "modo": "REPETIR_PEDIDO",
