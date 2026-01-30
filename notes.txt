@@ -1,0 +1,27 @@
+npm run dev
+curl http://localhost:3000/login-test
+
+curl http://localhost:3000/purchase `
+   -Method POST `
+   -Headers @{ "Content-Type" = "application/json" } `
+   -Body '{
+     "usuario": {
+       "username": "bot4",
+       "password": "12345678"
+     },
+     "entrega": {
+       "tipo": "DELIVERY",
+       "direcciones": [3689481245],
+       "fecha": "2026-01-27",
+       "banda": "MANIANA"
+     },
+     "carrito": {
+       "modo": "REPETIR_PEDIDO",
+       "numeroPedido": "762633139",
+       "orderId": "901537001"
+     },
+     "pago": {
+       "formaPagoId": 60,
+       "tarjetaBancoId": "T_997997162"
+     }
+   }'
